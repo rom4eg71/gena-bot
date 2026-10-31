@@ -23,6 +23,7 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 const userStates = {}; 
 const activeChats = {}; 
+let waitingClientId = null; // <-- ГЛАВНАЯ ПЕРЕМЕННАЯ: кто ждет менеджера
 
 // --- WebSocket ---
 wss.on('connection', (ws, req) => {
@@ -56,29 +57,27 @@ const lures = [
     { id: 2, name: "Набор TANTA Vibro Slug (26 мм)", fish: "Щука", price: 1500, desc: "40 шт. Lox UV, болото, карамель.", image: "https://images.unsplash.com/photo-1522069169874-c58ec4b76be5?q=80&w=400", action: "В корзину 🛒" }
 ];
 
-// --- Основной эндпоинт чата ---
+// --- Чат ---
 app.post('/api/chat', async (req, res) => {
     const { userId, text } = req.body;
     if (!userId || !text) return res.status(400).json({ error: "Неверный запрос" });
 
-    // Инициализация, если пользователь новый
     if (!userStates[userId]) {
         userStates[userId] = { step: 'start', data: {} };
     }
 
     const state = userStates[userId];
 
-    // --- ГЛАВНОЕ ИСПРАВЛЕНИЕ: Если ждем менеджера, не запускаем сценарий заново ---
+    // --- Если ждем менеджера ---
     if (state.step === 'waiting_for_manager') {
-        // Пересылаем сообщение клиента вам в Telegram
         await sendToTelegram(`💬 <b>Клиент (${userId}) написал:</b>\n${text}`);
         return res.json({
             text: "Сообщение передано менеджеру. Ожидайте ответа здесь...",
-            options: [] // Кнопки убираем, чтобы не сбивать
+            options: []
         });
     }
 
-    // --- Кнопка "Начать заново" (сброс) ---
+    // --- Сброс ---
     if (text === "Начать заново") {
         delete userStates[userId];
         return res.json({
@@ -87,28 +86,21 @@ app.post('/api/chat', async (req, res) => {
         });
     }
 
-    // --- Кнопка "Позвать менеджера" ---
+    // --- Вызов менеджера ---
     if (text === "Позвать менеджера") {
         state.step = 'waiting_for_manager';
-        await sendToTelegram(`🚨 <b>Клиент просит менеджера!</b>\nID: <code>${userId}</code>\n\n<i>Напишите ответ в этот чат, и клиент увидит его на сайте.</i>`);
+        waitingClientId = userId; // <-- ЗАПОМИНАЕМ КЛИЕНТА
+        await sendToTelegram(`🚨 <b>Клиент просит менеджера!</b>\nID: <code>${userId}</code>`);
         return res.json({
-            text: "Секунду, я передал трубку менеджеру! Напишите свой вопрос, и он ответит вам здесь.",
-            options: [] // Кнопки убираем
+            text: "Секунду, передаю трубку менеджеру! Напишите свой вопрос, и он ответит здесь.",
+            options: []
         });
     }
 
     // --- Стандартный сценарий ---
-    if (state.step === 'start') {
-        state.step = 'ask_fish';
-        return res.json({
-            text: "Привет! Я Гена, помогу подобрать силикон TANTA. На какую рыбу планируете охоту?",
-            options: ["Окунь", "Щука", "Судак", "Не знаю"]
-        });
-    }
-
-    if (state.step === 'ask_fish') {
-        state.data.fish = text;
+    if (state.step === 'start' || state.step === 'ask_fish') {
         state.step = 'ask_water';
+        state.data.fish = text;
         return res.json({
             text: `Отлично, ${text.toLowerCase()}! Где планируете ловить?`,
             options: ["Река с течением", "Закрытый водоем", "Не знаю"]
@@ -118,7 +110,6 @@ app.post('/api/chat', async (req, res) => {
     if (state.step === 'ask_water') {
         state.step = 'free_chat';
         const found = lures.filter(l => (state.data.fish === "Не знаю" || l.fish === state.data.fish));
-        
         return res.json({
             text: found.length > 0 ? "Вот лучшие варианты:" : "Пока пусто. Давай изменим условия?",
             type: found.length > 0 ? 'products' : 'text',
@@ -127,7 +118,7 @@ app.post('/api/chat', async (req, res) => {
         });
     }
 
-    // --- Свободный чат (ИИ) ---
+    // --- ИИ ---
     if (state.step === 'free_chat') {
         try {
             const completion = await openai.chat.completions.create({
@@ -169,11 +160,12 @@ app.post('/api/telegram-webhook', (req, res) => {
     const { message } = req.body;
     if (message && message.text) {
         const text = message.text;
-        // Ищем всех, кто ждет менеджера, и отправляем им ответ
-        for (const userId in userStates) {
-            if (userStates[userId].step === 'waiting_for_manager' && activeChats[userId]) {
-                activeChats[userId].send(JSON.stringify({ type: 'manager_reply', text: text }));
-            }
+        
+        if (waitingClientId && activeChats[waitingClientId]) {
+            activeChats[waitingClientId].send(JSON.stringify({ type: 'manager_reply', text: text }));
+            console.log(`Ответ отправлен клиенту ${waitingClientId}`);
+        } else {
+            console.log("Клиент не найден или не подключен по WebSocket.");
         }
     }
     res.sendStatus(200);
