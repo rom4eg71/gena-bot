@@ -6,49 +6,66 @@ const path = require('path');
 const axios = require('axios');
 const http = require('http');
 const { WebSocketServer } = require('ws');
+const mysql = require('mysql2/promise');
 
 const app = express();
 const PORT = process.env.PORT || 3000;
-
 const server = http.createServer(app);
 const wss = new WebSocketServer({ server });
 
-app.use(cors({
-    origin: ['https://worldbaits.ru', 'https://www.worldbaits.ru', 'http://localhost:3000', 'http://127.0.0.1:3000']
-}));
+app.use(cors({ origin: '*' })); 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-const userStates = {}; 
-const activeChats = {}; 
-let waitingClientId = null; // <-- ГЛАВНАЯ ПЕРЕМЕННАЯ: кто ждет менеджера
+// --- Подключение к MySQL ---
+const pool = mysql.createPool({
+    host: process.env.DB_HOST,
+    user: process.env.DB_USER,
+    password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME,
+    waitForConnections: true,
+    connectionLimit: 10,
+    queueLimit: 0
+});
+
+// Проверка подключения
+pool.getConnection()
+    .then(conn => { console.log("MySQL подключена"); conn.release(); })
+    .catch(err => console.error("Ошибка MySQL:", err.message));
 
 // --- WebSocket ---
+const activeChats = {};
+const adminSockets = [];
+
 wss.on('connection', (ws, req) => {
     const urlParams = new URLSearchParams(req.url.replace('/?', ''));
     const userId = urlParams.get('userId');
-    if (userId) {
+    const isAdmin = urlParams.get('admin') === 'true';
+
+    if (isAdmin) {
+        adminSockets.push(ws);
+        ws.on('close', () => {
+            const index = adminSockets.indexOf(ws);
+            if (index > -1) adminSockets.splice(index, 1);
+        });
+    } else if (userId) {
         activeChats[userId] = ws;
         ws.on('close', () => delete activeChats[userId]);
     }
 });
 
-// --- Telegram ---
+// --- Функция отправки в Telegram ---
 async function sendToTelegram(message) {
     const token = process.env.TELEGRAM_TOKEN;
     const chatId = process.env.TELEGRAM_CHAT_ID;
     if (!token || !chatId) return;
     try {
         await axios.post(`https://api.telegram.org/bot${token}/sendMessage`, {
-            chat_id: chatId,
-            text: message,
-            parse_mode: 'HTML'
+            chat_id: chatId, text: message, parse_mode: 'HTML'
         });
-    } catch (error) {
-        console.error("Ошибка Telegram:", error.message);
-    }
+    } catch (e) { console.error("Telegram error", e.message); }
 }
 
 // --- Товары ---
@@ -57,120 +74,111 @@ const lures = [
     { id: 2, name: "Набор TANTA Vibro Slug (26 мм)", fish: "Щука", price: 1500, desc: "40 шт. Lox UV, болото, карамель.", image: "https://images.unsplash.com/photo-1522069169874-c58ec4b76be5?q=80&w=400", action: "В корзину 🛒" }
 ];
 
-// --- Чат ---
+// --- ЧАТ (Клиент -> Сервер) ---
 app.post('/api/chat', async (req, res) => {
     const { userId, text } = req.body;
-    if (!userId || !text) return res.status(400).json({ error: "Неверный запрос" });
+    
+    try {
+        // 1. Сохраняем сообщение клиента
+        await pool.query(
+            'INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)',
+            [userId, 'client', text]
+        );
 
-    if (!userStates[userId]) {
-        userStates[userId] = { step: 'start', data: {} };
-    }
+        // 2. Отправляем в админку (если открыта)
+        adminSockets.forEach(ws => ws.send(JSON.stringify({ type: 'new_message', userId, text })));
 
-    const state = userStates[userId];
-
-    // --- Если ждем менеджера ---
-    if (state.step === 'waiting_for_manager') {
-        await sendToTelegram(`💬 <b>Клиент (${userId}) написал:</b>\n${text}`);
-        return res.json({
-            text: "Сообщение передано менеджеру. Ожидайте ответа здесь...",
-            options: []
-        });
-    }
-
-    // --- Сброс ---
-    if (text === "Начать заново") {
-        delete userStates[userId];
-        return res.json({
-            text: "Поехали заново! На какую рыбу планируете охоту?",
-            options: ["Окунь", "Щука", "Судак", "Не знаю"]
-        });
-    }
-
-    // --- Вызов менеджера ---
-    if (text === "Позвать менеджера") {
-        state.step = 'waiting_for_manager';
-        waitingClientId = userId; // <-- ЗАПОМИНАЕМ КЛИЕНТА
-        await sendToTelegram(`🚨 <b>Клиент просит менеджера!</b>\nID: <code>${userId}</code>`);
-        return res.json({
-            text: "Секунду, передаю трубку менеджеру! Напишите свой вопрос, и он ответит здесь.",
-            options: []
-        });
-    }
-
-    // --- Стандартный сценарий ---
-    if (state.step === 'start' || state.step === 'ask_fish') {
-        state.step = 'ask_water';
-        state.data.fish = text;
-        return res.json({
-            text: `Отлично, ${text.toLowerCase()}! Где планируете ловить?`,
-            options: ["Река с течением", "Закрытый водоем", "Не знаю"]
-        });
-    }
-
-    if (state.step === 'ask_water') {
-        state.step = 'free_chat';
-        const found = lures.filter(l => (state.data.fish === "Не знаю" || l.fish === state.data.fish));
-        return res.json({
-            text: found.length > 0 ? "Вот лучшие варианты:" : "Пока пусто. Давай изменим условия?",
-            type: found.length > 0 ? 'products' : 'text',
-            products: found,
-            options: ["Начать заново", "Позвать менеджера"]
-        });
-    }
-
-    // --- ИИ ---
-    if (state.step === 'free_chat') {
-        try {
-            const completion = await openai.chat.completions.create({
-                model: "gpt-4o-mini",
-                messages: [{ role: "system", content: "Ты — Гена, эксперт по силикону TANTA." }, { role: "user", content: text }],
-                max_tokens: 200
-            });
-            return res.json({
-                text: completion.choices[0].message.content,
-                options: ["Начать заново", "Позвать менеджера"]
-            });
-        } catch (error) {
-            return res.json({ text: "Связь пропала. Попробуем еще раз?", options: ["Начать заново", "Позвать менеджера"] });
-        }
-    }
-});
-
-// --- Заказ ---
-app.post('/api/order', async (req, res) => {
-    const { userId, productName, price } = req.body;
-    userStates[userId] = { step: 'awaiting_phone', data: { productName, price } };
-    await sendToTelegram(`🛒 <b>Клиент хочет заказать:</b>\n${productName} за ${price} ₽`);
-    res.json({ success: true, message: "Отлично! Напишите ваше ФИО и телефон." });
-});
-
-app.post('/api/contact', async (req, res) => {
-    const { userId, contactInfo } = req.body;
-    const state = userStates[userId];
-    if (state && state.step === 'awaiting_phone') {
-        await sendToTelegram(`🔥 <b>НОВЫЙ ЗАКАЗ!</b>\n📦 ${state.data.productName}\n💰 ${state.data.price} ₽\n👤 ${contactInfo}\n🆔 <code>${userId}</code>`);
-        delete userStates[userId];
-        return res.json({ success: true, message: "Спасибо! Заказ принят." });
-    }
-    res.json({ success: false, message: "Ошибка." });
-});
-
-// --- Вебхук Telegram (ответ менеджера) ---
-app.post('/api/telegram-webhook', (req, res) => {
-    const { message } = req.body;
-    if (message && message.text) {
-        const text = message.text;
+        // 3. Логика ответа бота (пока простая)
+        let botReply = "Я передал ваш вопрос менеджеру. Ожидайте!";
         
-        if (waitingClientId && activeChats[waitingClientId]) {
-            activeChats[waitingClientId].send(JSON.stringify({ type: 'manager_reply', text: text }));
-            console.log(`Ответ отправлен клиенту ${waitingClientId}`);
-        } else {
-            console.log("Клиент не найден или не подключен по WebSocket.");
+        // 4. Сохраняем ответ бота
+        await pool.query(
+            'INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)',
+            [userId, 'bot', botReply]
+        );
+        
+        // 5. Отправляем клиенту
+        if (activeChats[userId]) {
+            activeChats[userId].send(JSON.stringify({ type: 'bot_reply', text: botReply }));
         }
+
+        res.json({ success: true });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Ошибка базы данных" });
     }
-    res.sendStatus(200);
 });
 
-server.listen(PORT, '0.0.0.0', () => {
-    console.log(`Сервер запущен: http://localhost:${PORT}`);
+// --- ЗАКАЗЫ ---
+app.post('/api/order', async (req, res) => {
+    const { userId, productName, price, contactInfo } = req.body;
+    
+    try {
+        await pool.query(
+            'INSERT INTO orders (user_id, product_name, price, contact_info) VALUES (?, ?, ?, ?)',
+            [userId, productName, price, contactInfo || 'Не указаны']
+        );
+
+        await sendToTelegram(`🔥 <b>НОВЫЙ ЗАКАЗ!</b>\n📦 ${productName}\n💰 ${price} ₽\n👤 ${contactInfo || 'Клиент не оставил контакты'}`);
+
+        res.json({ success: true, message: "Заказ принят!" });
+    } catch (error) {
+        console.error(error);
+        res.status(500).json({ error: "Ошибка базы данных" });
+    }
 });
+
+// --- АДМИН ПАНЕЛЬ: Список диалогов ---
+app.get('/api/admin/dialogs', async (req, res) => {
+    try {
+        // Получаем последнее сообщение для каждого уникального пользователя
+        const [rows] = await pool.query(`
+            SELECT m1.user_id, m1.text as last_message, m1.created_at
+            FROM messages m1
+            INNER JOIN (
+                SELECT user_id, MAX(id) as max_id
+                FROM messages
+                GROUP BY user_id
+            ) m2 ON m1.id = m2.max_id
+            ORDER BY m1.created_at DESC
+        `);
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- АДМИН ПАНЕЛЬ: История клиента ---
+app.get('/api/admin/dialogs/:userId', async (req, res) => {
+    try {
+        const [rows] = await pool.query(
+            'SELECT * FROM messages WHERE user_id = ? ORDER BY created_at ASC',
+            [req.params.userId]
+        );
+        res.json(rows);
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+// --- АДМИН ПАНЕЛЬ: Ответ клиенту ---
+app.post('/api/admin/reply', async (req, res) => {
+    const { userId, text } = req.body;
+    
+    try {
+        await pool.query(
+            'INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)',
+            [userId, 'admin', text]
+        );
+        
+        if (activeChats[userId]) {
+            activeChats[userId].send(JSON.stringify({ type: 'admin_reply', text }));
+        }
+        
+        res.json({ success: true });
+    } catch (error) {
+        res.status(500).json({ error: error.message });
+    }
+});
+
+server.listen(PORT, '0.0.0.0', () => console.log(`Сервер с MySQL запущен: http://localhost:${PORT}`));
