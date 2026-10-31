@@ -93,7 +93,7 @@ function renderProducts(products) {
                 <p>${p.desc}</p>
                 <div class="product-footer">
                     <span class="product-price">${p.price} ₽</span>
-                    <button class="buy-btn" onclick="alert('Товар добавлен в корзину!')">${p.action}</button>
+                    <button class="buy-btn" onclick="buyProduct('${p.name}', ${p.price})">${p.action}</button>
                 </div>
             </div>
         `;
@@ -102,6 +102,27 @@ function renderProducts(products) {
 
     messagesArea.appendChild(wrapper);
     messagesArea.scrollTop = messagesArea.scrollHeight;
+}
+
+// Новая функция оформления заказа
+async function buyProduct(name, price) {
+    try {
+        const response = await fetch(`${API_URL}/api/order`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: userId, productName: name, price: price })
+        });
+        const data = await response.json();
+        
+        if (data.success) {
+            // Добавляем сообщение от бота в чат
+            addMessage(`Отлично! Вы выбрали <b>${name}</b> за ${price} ₽. Я передал заказ менеджеру, он свяжется с вами в ближайшее время для уточнения деталей. 🚀`, 'bot');
+        } else {
+            addMessage("Упс, не получилось оформить заказ. Попробуйте еще раз.", 'bot');
+        }
+    } catch (e) {
+        addMessage("Ошибка соединения при оформлении заказа.", 'bot');
+    }
 }
 
 function renderOptions(options) {
