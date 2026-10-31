@@ -11,7 +11,6 @@ const userId = "user_" + Math.random().toString(36).substr(2, 9);
 let isChatInitialized = false;
 let isWaitingForContact = false;
 
-// WebSocket
 const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
 const wsHost = window.location.hostname === 'localhost' ? 'localhost:3000' : 'gena-bot-sthi.onrender.com';
 let socket = new WebSocket(`${wsProtocol}//${wsHost}/?userId=${userId}`);
@@ -20,12 +19,8 @@ socket.onmessage = (event) => {
     const data = JSON.parse(event.data);
     if (data.type === 'bot_reply') {
         removeTyping();
-        if (data.products) { 
-            addMessage(data.text, 'bot'); 
-            renderProducts(data.products); 
-        } else { 
-            addMessage(data.text, 'bot'); 
-        }
+        if (data.products) { addMessage(data.text, 'bot'); renderProducts(data.products); } 
+        else { addMessage(data.text, 'bot'); }
         if (data.options && data.options.length > 0) renderOptions(data.options);
     } 
     else if (data.type === 'admin_reply') {
@@ -96,8 +91,16 @@ async function handleContactSubmit(text) {
             body: JSON.stringify({ userId, contactInfo: text }) 
         });
         const data = await res.json();
-        removeTyping(); addMessage(data.message, 'bot'); isWaitingForContact = false;
-        renderOptions(["Начать заново"]);
+        removeTyping(); 
+        addMessage(data.message, 'bot'); 
+        
+        if (data.success) {
+            isWaitingForContact = false;
+            renderOptions(["Начать заново"]);
+        } else {
+            // Если ошибка (например, нет цифр), остаемся в режиме ожидания
+            // Кнопки не показываем, чтобы клиент ввел телефон
+        }
     } catch (e) { removeTyping(); addMessage("Ошибка отправки данных.", 'bot'); }
 }
 
