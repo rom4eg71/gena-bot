@@ -8,7 +8,7 @@ const sendBtn = document.getElementById('send-btn');
 
 // Если скрипт лежит на том же сервере, оставляем пустую строку.
 // Если виджет встраивается на worldbaits.ru, укажите URL вашего задеплоенного сервера:
-const API_URL = window.location.hostname === 'localhost' ? '' : 'https://ваш-сервер.onrender.com';
+const API_URL = window.location.hostname === 'localhost' ? '' : 'https://gena-bot-sthi.onrender.com';
 
 const userId = "user_" + Math.random().toString(36).substr(2, 9);
 let isChatInitialized = false;
