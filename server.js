@@ -7,17 +7,23 @@ const path = require('path');
 const app = express();
 const PORT = process.env.PORT || 3000;
 
-// Разрешаем запросы с вашего сайта
+// Разрешаем запросы с вашего сайта и локальной разработки
 app.use(cors({
-    origin: ['https://worldbaits.ru', 'http://localhost:3000', 'http://127.0.0.1:3000']
+    origin: ['https://worldbaits.ru', 'https://www.worldbaits.ru', 'http://localhost:3000', 'http://127.0.0.1:3000']
 }));
 
 app.use(express.json());
 app.use(express.static(path.join(__dirname, 'public')));
 
+// Разрешаем загрузку внешних картинок (для карточек товаров)
+app.use((req, res, next) => {
+    res.setHeader("Content-Security-Policy", "img-src * data:;");
+    next();
+});
+
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- База данных TANTA (на основе страницы /tanta/) ---
+// --- База данных TANTA с картинками ---
 const lures = [
     { 
         id: 1, 
@@ -26,7 +32,9 @@ const lures = [
         water: "Река", 
         type: "Ручная работа", 
         price: 1500, 
-        desc: "40 шт. в ячейке. Расцветки: Lox UV, болото, апельсин, лимонный, барби-розовый, гранат. Идеален для окуня." 
+        desc: "40 шт. в ячейке. Расцветки: Lox UV, болото, апельсин. Идеален для окуня.",
+        image: "https://images.unsplash.com/photo-1544551763-46a013bb70d5?q=80&w=400&auto=format&fit=crop", 
+        action: "В корзину 🛒"
     },
     { 
         id: 2, 
@@ -35,7 +43,9 @@ const lures = [
         water: "Река", 
         type: "Ручная работа", 
         price: 1500, 
-        desc: "40 шт. в ячейке. Расцветки: Lox UV, болото, апельсин, карамель, светло-фиолетовый, фиолетовый. Для щуки." 
+        desc: "40 шт. в ячейке. Расцветки: Lox UV, болото, карамель. Для щуки.",
+        image: "https://images.unsplash.com/photo-1522069169874-c58ec4b76be5?q=80&w=400&auto=format&fit=crop",
+        action: "В корзину 🛒"
     },
     { 
         id: 3, 
@@ -44,7 +54,9 @@ const lures = [
         water: "Озеро", 
         type: "Ручная работа", 
         price: 4500, 
-        desc: "Полный набор 480 шт. Размер коробки: 20.5x14.5x2.5 см. Только по предзаказу." 
+        desc: "Полный набор 480 шт. Размер коробки: 20.5x14.5x2.5 см. Только по предзаказу.",
+        image: "https://images.unsplash.com/photo-1599058917212-d750089bc07e?q=80&w=400&auto=format&fit=crop",
+        action: "Заказать 📦"
     },
     { 
         id: 4, 
@@ -53,25 +65,9 @@ const lures = [
         water: "Река", 
         type: "Ручная работа", 
         price: 400, 
-        desc: "Яркая приманка для мутной воды. Проверено на водоемах России." 
-    },
-    { 
-        id: 5, 
-        name: "TANTA Цвет 'Машинное масло'", 
-        fish: "Окунь", 
-        water: "Озеро", 
-        type: "Ручная работа", 
-        price: 400, 
-        desc: "Классика для окуня. Работает по пассивной рыбе." 
-    },
-    { 
-        id: 6, 
-        name: "TANTA Цвет 'Фиолетовый'", 
-        fish: "Судак", 
-        water: "Река", 
-        type: "Ручная работа", 
-        price: 400, 
-        desc: "Универсальный цвет для судака на течении." 
+        desc: "Яркая приманка для мутной воды. Проверено на водоемах России.",
+        image: "https://images.unsplash.com/photo-1534657433695-82645b3f2d4e?q=80&w=400&auto=format&fit=crop",
+        action: "В корзину 🛒"
     }
 ];
 
@@ -97,7 +93,7 @@ app.post('/api/chat', async (req, res) => {
     if (!userStates[userId]) {
         userStates[userId] = { step: 'start', data: {} };
         return res.json({
-            text: "Привет! Я Гена, эксперт по приманкам TANTA. Помогу подобрать идеальный силикон. На какую рыбу планируете охоту?",
+            text: "Привет! Я Гена, помогу подобрать идеальный силикон TANTA. На какую рыбу планируете охоту?",
             options: ["Окунь", "Щука", "Судак", "Не знаю"]
         });
     }
@@ -129,25 +125,23 @@ app.post('/api/chat', async (req, res) => {
         state.data.type = text.includes("ручной") ? "Ручная работа" : "Заводской";
         state.step = 'free_chat';
 
-        // Фильтрация товаров
         const found = lures.filter(l => 
-            (state.data.fish === "Не знаю" || l.fish === state.data.fish) &&
-            (state.data.water === "Не знаю" || l.water === state.data.water)
+            (state.data.fish === "Не знаю" || l.fish === state.data.fish)
         );
 
-        let responseText = "";
         if (found.length > 0) {
-            responseText = "Вот лучшие варианты TANTA под твой запрос:\n\n" + 
-                found.map(l => `🎣 **${l.name}**\n📝 ${l.desc}\n💰 Цена: ${l.price} руб.`).join('\n\n') + 
-                "\n\nЕсли нужен конкретный цвет или размер — просто напиши мне!";
+            return res.json({
+                text: "Вот лучшие варианты под твой запрос. Все проверено на водоемах России! 🎣",
+                type: 'products',
+                products: found,
+                options: ["Начать заново", "Позвать менеджера"]
+            });
         } else {
-            responseText = "Хм, по таким параметрам у нас пока пусто. Давай изменим условия или я позову менеджера?";
+            return res.json({
+                text: "Хм, по таким параметрам у нас пока пусто. Давай изменим условия или я позову менеджера?",
+                options: ["Начать заново", "Позвать менеджера"]
+            });
         }
-
-        return res.json({
-            text: responseText,
-            options: ["Начать заново", "Позвать менеджера"]
-        });
     }
 
     // --- Шаг 4: Свободный чат (ИИ) ---
