@@ -104,7 +104,7 @@ function renderProducts(products) {
     messagesArea.scrollTop = messagesArea.scrollHeight;
 }
 
-// Новая функция оформления заказа
+// Новая функция заказа
 async function buyProduct(name, price) {
     try {
         const response = await fetch(`${API_URL}/api/order`, {
@@ -115,15 +115,46 @@ async function buyProduct(name, price) {
         const data = await response.json();
         
         if (data.success) {
-            // Добавляем сообщение от бота в чат
-            addMessage(`Отлично! Вы выбрали <b>${name}</b> за ${price} ₽. Я передал заказ менеджеру, он свяжется с вами в ближайшее время для уточнения деталей. 🚀`, 'bot');
+            addMessage(data.message, 'bot');
+            // Меняем состояние: теперь ждем ввода контактов
+            window.awaitingContact = true;
         } else {
-            addMessage("Упс, не получилось оформить заказ. Попробуйте еще раз.", 'bot');
+            addMessage("Упс, не получилось оформить заказ.", 'bot');
         }
     } catch (e) {
-        addMessage("Ошибка соединения при оформлении заказа.", 'bot');
+        addMessage("Ошибка соединения.", 'bot');
     }
 }
+
+// Функция отправки контактов (вызывается, когда клиент вводит ФИО и телефон)
+async function submitContact(text) {
+    try {
+        const response = await fetch(`${API_URL}/api/contact`, {
+            method: 'POST',
+            headers: { 'Content-Type': 'application/json' },
+            body: JSON.stringify({ userId: userId, contactInfo: text })
+        });
+        const data = await response.json();
+        addMessage(data.message, 'bot');
+        window.awaitingContact = false; // Сбрасываем ожидание
+    } catch (e) {
+        addMessage("Ошибка при отправке данных.", 'bot');
+    }
+}
+
+// Перехватываем отправку сообщения, чтобы понять, это контакт или обычный вопрос
+const originalSendMessage = sendMessage;
+sendMessage = async function(text) {
+    if (window.awaitingContact) {
+        // Если ждем контакты, отправляем их в специальный эндпоинт
+        addMessage(text, 'user');
+        inputField.value = '';
+        await submitContact(text);
+    } else {
+        // Иначе обычная логика
+        originalSendMessage(text);
+    }
+};
 
 function renderOptions(options) {
     optionsArea.innerHTML = '';
