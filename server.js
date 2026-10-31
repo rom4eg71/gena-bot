@@ -172,6 +172,6 @@ app.post('/api/order', async (req, res) => {
     res.json({ success: true, message: "Заказ принят! Менеджер свяжется с вами." });
 });
 
-app.listen(PORT, () => {
+app.listen(PORT, '0.0.0.0', () => {
     console.log(`Сервер Гены (TANTA) запущен: http://localhost:${PORT}`);
 });
