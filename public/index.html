@@ -1,0 +1,35 @@
+<!DOCTYPE html>
+<html lang="ru">
+<head>
+    <meta charset="UTF-8">
+    <meta name="viewport" content="width=device-width, initial-scale=1.0">
+    <title>Чат с Геной - TANTA</title>
+    <link rel="stylesheet" href="style.css">
+</head>
+<body>
+
+    <!-- Виджет -->
+    <div id="chat-widget-button">🎣</div>
+
+    <div id="chat-widget" class="hidden">
+        <div class="chat-header">
+            <div class="avatar">Г</div>
+            <div class="info">
+                <h3>Гена</h3>
+                <span>Эксперт TANTA</span>
+            </div>
+            <button id="close-chat">✖</button>
+        </div>
+        
+        <div id="chat-messages" class="chat-messages"></div>
+        <div id="chat-options" class="chat-options"></div>
+
+        <div class="chat-input-area">
+            <input type="text" id="chat-input" placeholder="Спроси про TANTA...">
+            <button id="send-btn">➤</button>
+        </div>
+    </div>
+
+    <script src="script.js"></script>
+</body>
+</html>
