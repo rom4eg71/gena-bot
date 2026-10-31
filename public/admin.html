@@ -6,6 +6,8 @@
     <style>
         * { box-sizing: border-box; }
         body { font-family: 'Segoe UI', sans-serif; display: flex; height: 100vh; margin: 0; background: #f4f7f6; }
+        
+        /* Левая панель */
         .sidebar { width: 350px; background: white; border-right: 1px solid #ddd; display: flex; flex-direction: column; }
         .sidebar h3 { padding: 20px; margin: 0; background: #ff6b35; color: white; font-size: 18px; }
         #dialog-list { overflow-y: auto; flex: 1; }
@@ -14,50 +16,91 @@
         .dialog-item.active { background: #fff4ef; border-left: 4px solid #ff6b35; }
         .dialog-item b { display: block; font-size: 14px; margin-bottom: 4px; color: #333; }
         .dialog-item small { color: #888; font-size: 12px; }
+
+        /* Правая панель */
         .chat-area { flex: 1; display: flex; flex-direction: column; background: #efeae2; }
         .messages { flex: 1; padding: 20px; overflow-y: auto; display: flex; flex-direction: column; gap: 10px; }
         .msg { padding: 10px 14px; border-radius: 12px; max-width: 70%; font-size: 14px; line-height: 1.4; }
         .msg.client { background: white; align-self: flex-start; border-bottom-left-radius: 2px; }
         .msg.admin { background: #dcf8c6; align-self: flex-end; border-bottom-right-radius: 2px; }
         .msg.bot { background: #e3f2fd; align-self: flex-start; border-bottom-left-radius: 2px; color: #555; font-style: italic; }
+        
+        /* Поле ввода */
         .input-area { display: flex; padding: 15px; background: white; border-top: 1px solid #ddd; gap: 10px; }
-        .input-area input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 20px; outline: none; }
+        .input-area input { flex: 1; padding: 12px; border: 1px solid #ddd; border-radius: 20px; outline: none; font-size: 14px; }
+        .input-area input:focus { border-color: #ff6b35; }
         .input-area button { padding: 10px 24px; background: #ff6b35; color: white; border: none; border-radius: 20px; cursor: pointer; font-weight: bold; }
+        .input-area button:hover { background: #e55a2b; }
+
+        .empty-state { display: flex; align-items: center; justify-content: center; height: 100%; color: #888; font-size: 16px; }
     </style>
 </head>
 <body>
+
 <div class="sidebar">
     <h3>Диалоги клиентов</h3>
-    <div id="dialog-list"><div style="padding: 20px; text-align: center; color: #888;">Загрузка...</div></div>
+    <div id="dialog-list">
+        <div style="padding: 20px; color: #888; text-align: center;">Загрузка...</div>
+    </div>
 </div>
+
 <div class="chat-area">
-    <div class="messages" id="chat-messages"><div style="text-align:center; color:#888; margin-top: 20px;">Выберите клиента слева</div></div>
+    <div class="messages" id="chat-messages">
+        <div class="empty-state">Выберите диалог слева, чтобы начать общение</div>
+    </div>
     <div class="input-area" id="input-area" style="display:none;">
         <input type="text" id="admin-input" placeholder="Написать клиенту...">
         <button onclick="sendAdminMessage()">Отправить</button>
     </div>
 </div>
+
 <script>
     let currentUserId = null;
     const API_URL = window.location.origin;
 
+    // --- 1. Подключение к WebSocket (для получения новых сообщений) ---
+    const wsProtocol = window.location.protocol === 'https:' ? 'wss:' : 'ws:';
+    const wsHost = window.location.hostname;
+    const socket = new WebSocket(`${wsProtocol}//${wsHost}/?admin=true`);
+
+    socket.onmessage = (event) => {
+        const data = JSON.parse(event.data);
+        if (data.type === 'new_message') {
+            // Если пришло новое сообщение от клиента, обновляем список диалогов
+            loadDialogs();
+            // Если открыт чат с этим клиентом, обновляем историю
+            if (currentUserId === data.userId) {
+                loadHistory(currentUserId);
+            }
+        }
+    };
+
+    // --- 2. Загрузка списка диалогов ---
     async function loadDialogs() {
         try {
             const res = await fetch(`${API_URL}/api/admin/dialogs`);
             const dialogs = await res.json();
             const list = document.getElementById('dialog-list');
-            if (dialogs.length === 0) { list.innerHTML = '<div style="padding: 20px; text-align: center; color: #888;">Нет диалогов</div>'; return; }
+            
+            if (dialogs.length === 0) {
+                list.innerHTML = '<div style="padding: 20px; color: #888; text-align: center;">Пока нет диалогов</div>';
+                return;
+            }
+
             list.innerHTML = '';
             dialogs.forEach(d => {
                 const div = document.createElement('div');
-                div.className = 'dialog-item'; div.dataset.id = d.user_id;
-                div.innerHTML = `<b>${d.user_id}</b><small>${d.last_message ? d.last_message.substring(0, 50) : 'Нет сообщений'}...</small>`;
+                div.className = 'dialog-item';
+                div.dataset.id = d.user_id;
+                if (currentUserId === d.user_id) div.classList.add('active');
+                div.innerHTML = `<b>${d.user_id}</b><small>${d.last_message ? d.last_message.substring(0, 40) : 'Нет сообщений'}...</small>`;
                 div.onclick = () => loadHistory(d.user_id, div);
                 list.appendChild(div);
             });
         } catch (e) { console.error(e); }
     }
 
+    // --- 3. Загрузка истории клиента ---
     async function loadHistory(userId, element) {
         currentUserId = userId;
         document.querySelectorAll('.dialog-item').forEach(el => el.classList.remove('active'));
@@ -68,6 +111,12 @@
             const res = await fetch(`${API_URL}/api/admin/dialogs/${userId}`);
             const history = await res.json();
             const area = document.getElementById('chat-messages');
+            
+            if (history.length === 0) {
+                area.innerHTML = '<div class="empty-state">История пуста</div>';
+                return;
+            }
+
             area.innerHTML = '';
             history.forEach(m => {
                 const div = document.createElement('div');
@@ -76,25 +125,33 @@
                 area.appendChild(div);
             });
             area.scrollTop = area.scrollHeight;
-        } catch(e) { console.error(e); }
+        } catch (e) { console.error(e); }
     }
 
+    // --- 4. Отправка ответа клиенту ---
     async function sendAdminMessage() {
         const input = document.getElementById('admin-input');
         const text = input.value.trim();
         if (!text || !currentUserId) return;
+
         input.value = '';
+        
         try {
-            await fetch(`${API_URL}/api/admin/reply`, { 
-                method: 'POST', headers: { 'Content-Type': 'application/json' }, 
-                body: JSON.stringify({ userId: currentUserId, text }) 
+            await fetch(`${API_URL}/api/admin/reply`, {
+                method: 'POST',
+                headers: { 'Content-Type': 'application/json' },
+                body: JSON.stringify({ userId: currentUserId, text: text })
             });
+            // Обновляем историю, чтобы увидеть свое сообщение
             loadHistory(currentUserId);
-        } catch(e) { alert("Ошибка отправки"); }
+        } catch (e) {
+            alert("Ошибка отправки сообщения");
+        }
     }
-    
+
+    // --- 5. Автообновление списка каждые 5 секунд (на случай, если WebSocket не сработал) ---
     setInterval(loadDialogs, 5000);
-    loadDialogs();
+    loadDialogs(); // Первая загрузка
 </script>
 </body>
 </html>
