@@ -21,17 +21,13 @@ const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
 // --- База данных ---
 const pool = mysql.createPool({
-    host: process.env.DB_HOST,
-    user: process.env.DB_USER,
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME,
-    waitForConnections: true,
-    connectionLimit: 10
+    host: process.env.DB_HOST, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, waitForConnections: true, connectionLimit: 10
 });
 
-// --- WebSocket ---
-const activeChats = {}; // Клиенты
-const adminSockets = []; // Админы
+// --- WebSocket (Связь сайт <-> админка) ---
+const activeChats = {}; // Клиенты на сайте
+const adminSockets = []; // Вы в админке
 
 wss.on('connection', (ws, req) => {
     const urlParams = new URLSearchParams(req.url.replace('/?', ''));
@@ -40,10 +36,7 @@ wss.on('connection', (ws, req) => {
 
     if (isAdmin) {
         adminSockets.push(ws);
-        ws.on('close', () => {
-            const index = adminSockets.indexOf(ws);
-            if (index > -1) adminSockets.splice(index, 1);
-        });
+        ws.on('close', () => { const i = adminSockets.indexOf(ws); if (i > -1) adminSockets.splice(i, 1); });
     } else if (userId) {
         activeChats[userId] = ws;
         ws.on('close', () => delete activeChats[userId]);
@@ -56,136 +49,136 @@ const lures = [
     { id: 2, name: "Набор TANTA Vibro Slug (26 мм)", fish: "Щука", price: 1500, desc: "40 шт. Lox UV, болото, карамель.", image: "https://images.unsplash.com/photo-1522069169874-c58ec4b76be5?q=80&w=400", action: "В корзину 🛒" }
 ];
 
-// --- Память для сценария (храним шаги в памяти, а не в БД) ---
+// --- Память сценария ---
 const userStates = {}; 
 
-// --- ГЛАВНЫЙ ЭНДПОИНТ ЧАТА ---
+// --- ЧАТ ---
 app.post('/api/chat', async (req, res) => {
     const { userId, text } = req.body;
     
-    // 1. Сохраняем сообщение клиента в БД
+    // Сохраняем в БД
     await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'client', text]);
-    
-    // 2. Отправляем в админку
     adminSockets.forEach(ws => ws.send(JSON.stringify({ type: 'new_message', userId, text })));
 
-    // 3. Логика бота
-    if (!userStates[userId]) {
-        userStates[userId] = { step: 'start', data: {} };
-    }
+    if (!userStates[userId]) userStates[userId] = { step: 'start', data: {} };
     const state = userStates[userId];
     let botReply = "";
     let options = [];
-    let isProducts = false;
+    let productsToSend = null;
 
-    if (state.step === 'start') {
+    if (state.step === 'waiting_for_manager') {
+        // Если ждем менеджера, бот молчит, только пересылает вам
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID, text: `💬 Клиент (${userId}): ${text}`
+        });
+        return res.json({ text: "", options: [] }); // Клиенту ничего не отвечаем, ждем вас
+    }
+
+    if (text === "Начать заново") {
+        delete userStates[userId];
+        return res.json({ text: "Поехали заново! На какую рыбу планируете охоту?", options: ["Окунь", "Щука", "Судак", "Не знаю"] });
+    }
+
+    if (text === "Позвать менеджера") {
+        state.step = 'waiting_for_manager';
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID, text: `🚨 Клиент (${userId}) просит менеджера!`
+        });
+        botReply = "Секунду, я передал трубку менеджеру! Напишите свой вопрос, и он ответит вам здесь.";
+        options = [];
+    }
+    else if (state.step === 'start') {
         state.step = 'ask_fish';
         botReply = "Привет! Я Гена, помогу подобрать силикон TANTA. На какую рыбу планируете охоту?";
         options = ["Окунь", "Щука", "Судак", "Не знаю"];
-    } 
+    }
     else if (state.step === 'ask_fish') {
-        state.data.fish = text;
-        state.step = 'ask_water';
+        state.data.fish = text; state.step = 'ask_water';
         botReply = `Отлично, ${text.toLowerCase()}! Где планируете ловить?`;
         options = ["Река с течением", "Закрытый водоем", "Не знаю"];
     }
     else if (state.step === 'ask_water') {
-        state.data.water = text;
-        state.step = 'free_chat';
-        
+        state.data.water = text; state.step = 'free_chat';
         const found = lures.filter(l => (state.data.fish === "Не знаю" || l.fish === state.data.fish));
         if (found.length > 0) {
-            botReply = "Вот лучшие варианты:";
-            options = ["Начать заново", "Позвать менеджера"];
-            isProducts = true;
+            botReply = "Вот лучшие варианты:"; options = ["Начать заново", "Позвать менеджера"]; productsToSend = found;
         } else {
-            botReply = "Пока пусто. Давай изменим условия?";
-            options = ["Начать заново", "Позвать менеджера"];
+            botReply = "Пока пусто. Давай изменим условия?"; options = ["Начать заново", "Позвать менеджера"];
         }
     }
     else if (state.step === 'free_chat') {
-        if (text === "Начать заново") {
-            delete userStates[userId];
-            return res.json({ text: "Поехали заново! На какую рыбу планируете охоту?", options: ["Окунь", "Щука", "Судак", "Не знаю"] });
-        }
-        if (text === "Позвать менеджера") {
-            state.step = 'waiting_for_manager';
-            await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
-                chat_id: process.env.TELEGRAM_CHAT_ID,
-                text: `🚨 Клиент (${userId}) просит менеджера!`
-            });
-            return res.json({ text: "Секунду, я передал трубку менеджеру! Напишите свой вопрос, и он ответит вам здесь.", options: [] });
-        }
-
-        // --- УМНЫЙ ОТВЕТ ОТ ИИ ---
         try {
             const completion = await openai.chat.completions.create({
                 model: "gpt-4o-mini",
-                messages: [
-                    { role: "system", content: "Ты — Гена, эксперт-рыболов магазина WorldBaits. Продаешь силикон TANTA. Отвечай дружелюбно, используй рыбацкий сленг." },
-                    { role: "user", content: text }
-                ],
+                messages: [{ role: "system", content: "Ты — Гена, эксперт по рыбалке. Продаешь TANTA. Отвечай дружелюбно." }, { role: "user", content: text }],
                 max_tokens: 200
             });
-            botReply = completion.choices[0].message.content;
-            options = ["Начать заново", "Позвать менеджера"];
-        } catch (error) {
-            botReply = "Ой, связь пропала. Попробуем еще раз?";
-            options = ["Начать заново", "Позвать менеджера"];
-        }
+            botReply = completion.choices[0].message.content; options = ["Начать заново", "Позвать менеджера"];
+        } catch (error) { botReply = "Связь пропала. Попробуем еще раз?"; options = ["Начать заново", "Позвать менеджера"]; }
     }
 
-    // 4. Сохраняем ответ бота в БД
+    // Сохраняем ответ бота и отправляем
     await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'bot', botReply]);
-
-    // 5. Отправляем клиенту
+    
+    // Отправляем ответ ТОЛЬКО через WebSocket (чтобы не было дублей)
     if (activeChats[userId]) {
-        activeChats[userId].send(JSON.stringify({ 
-            type: 'bot_reply', 
-            text: botReply, 
-            options: options,
-            products: isProducts ? lures.filter(l => (state.data.fish === "Не знаю" || l.fish === state.data.fish)) : null
-        }));
+        activeChats[userId].send(JSON.stringify({ type: 'bot_reply', text: botReply, options, products: productsToSend }));
     }
-
-    // 6. Отвечаем через HTTP (для синхронного режима)
-    res.json({
-        text: botReply,
-        options: options,
-        type: isProducts ? 'products' : 'text',
-        products: isProducts ? lures.filter(l => (state.data.fish === "Не знаю" || l.fish === state.data.fish)) : null
-    });
+    
+    // Отвечаем HTTP-запросом (на случай, если WebSocket не сработал)
+    res.json({ text: botReply, options, type: productsToSend ? 'products' : 'text', products: productsToSend });
 });
 
-// --- АДМИНКА: История и ответы ---
-app.get('/api/admin/dialogs', async (req, res) => {
+// --- ЗАКАЗ (Кнопка "В корзину") ---
+app.post('/api/order', async (req, res) => {
+    const { userId, productName, price } = req.body;
     try {
-        const [rows] = await pool.query(`
-            SELECT m1.user_id, m1.text as last_message, m1.created_at
-            FROM messages m1
-            INNER JOIN (SELECT user_id, MAX(id) as max_id FROM messages GROUP BY user_id) m2 
-            ON m1.id = m2.max_id ORDER BY m1.created_at DESC
-        `);
-        res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+        await pool.query('INSERT INTO orders (user_id, product_name, price) VALUES (?, ?, ?)', [userId, productName, price]);
+        userStates[userId] = { step: 'awaiting_phone', data: { productName, price } };
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID, text: `🛒 Клиент (${userId}) хочет: ${productName} за ${price} ₽`
+        });
+        res.json({ success: true, message: `Отлично! Вы выбрали ${productName}. Напишите ваше ФИО и телефон.` });
+    } catch (e) { res.status(500).json({ error: "Ошибка БД" }); }
+});
+
+app.post('/api/contact', async (req, res) => {
+    const { userId, contactInfo } = req.body;
+    const state = userStates[userId];
+    if (state && state.step === 'awaiting_phone') {
+        await pool.query('UPDATE orders SET contact_info = ? WHERE user_id = ? ORDER BY id DESC LIMIT 1', [contactInfo, userId]);
+        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
+            chat_id: process.env.TELEGRAM_CHAT_ID, text: `🔥 ЗАКАЗ! Товар: ${state.data.productName}. Контакт: ${contactInfo}`
+        });
+        delete userStates[userId];
+        return res.json({ success: true, message: "Спасибо! Заказ принят. Менеджер свяжется с вами." });
+    }
+    res.json({ success: false });
+});
+
+// --- АДМИНКА ---
+app.get('/api/admin/dialogs', async (req, res) => {
+    const [rows] = await pool.query(`
+        SELECT m1.user_id, m1.text as last_message, m1.created_at
+        FROM messages m1
+        INNER JOIN (SELECT user_id, MAX(id) as max_id FROM messages GROUP BY user_id) m2 
+        ON m1.id = m2.max_id ORDER BY m1.created_at DESC
+    `);
+    res.json(rows);
 });
 
 app.get('/api/admin/dialogs/:userId', async (req, res) => {
-    try {
-        const [rows] = await pool.query('SELECT * FROM messages WHERE user_id = ? ORDER BY created_at ASC', [req.params.userId]);
-        res.json(rows);
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    const [rows] = await pool.query('SELECT * FROM messages WHERE user_id = ? ORDER BY created_at ASC', [req.params.userId]);
+    res.json(rows);
 });
 
 app.post('/api/admin/reply', async (req, res) => {
     const { userId, text } = req.body;
-    try {
-        await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'admin', text]);
-        if (activeChats[userId]) {
-            activeChats[userId].send(JSON.stringify({ type: 'admin_reply', text }));
-        }
-        res.json({ success: true });
-    } catch (e) { res.status(500).json({ error: e.message }); }
+    await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'admin', text]);
+    if (activeChats[userId]) {
+        activeChats[userId].send(JSON.stringify({ type: 'admin_reply', text }));
+    }
+    res.json({ success: true });
 });
 
-server.listen(PORT, '0.0.0.0', () => console.log(`Сервер запущен: http://localhost:${PORT}`));
+server.listen(PORT, '0.0.0.0', () => console.log(`Сервер запущен: ${PORT}`));
