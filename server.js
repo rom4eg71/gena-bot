@@ -19,17 +19,11 @@ app.use(express.static(path.join(__dirname, 'public')));
 
 const openai = new OpenAI({ apiKey: process.env.OPENAI_API_KEY });
 
-// --- База данных ---
 const pool = mysql.createPool({
-    host: process.env.DB_HOST, 
-    user: process.env.DB_USER, 
-    password: process.env.DB_PASSWORD,
-    database: process.env.DB_NAME, 
-    waitForConnections: true, 
-    connectionLimit: 10
+    host: process.env.DB_HOST, user: process.env.DB_USER, password: process.env.DB_PASSWORD,
+    database: process.env.DB_NAME, waitForConnections: true, connectionLimit: 10
 });
 
-// --- WebSocket ---
 const activeChats = {}; 
 const adminSockets = []; 
 
@@ -40,32 +34,25 @@ wss.on('connection', (ws, req) => {
 
     if (isAdmin) {
         adminSockets.push(ws);
-        ws.on('close', () => { 
-            const i = adminSockets.indexOf(ws); 
-            if (i > -1) adminSockets.splice(i, 1); 
-        });
+        ws.on('close', () => { const i = adminSockets.indexOf(ws); if (i > -1) adminSockets.splice(i, 1); });
     } else if (userId) {
         activeChats[userId] = ws;
         ws.on('close', () => delete activeChats[userId]);
     }
 });
 
-// --- Товары ---
 const lures = [
     { id: 1, name: "Набор TANTA для микроджига (20 мм)", fish: "Окунь", price: 1500, desc: "40 шт. Lox UV, болото, апельсин.", image: "https://images.unsplash.com/photo-1544551763-46a013bb70d5?q=80&w=400", action: "В корзину 🛒" },
     { id: 2, name: "Набор TANTA Vibro Slug (26 мм)", fish: "Щука", price: 1500, desc: "40 шт. Lox UV, болото, карамель.", image: "https://images.unsplash.com/photo-1522069169874-c58ec4b76be5?q=80&w=400", action: "В корзину 🛒" },
     { id: 3, name: "TANTA Коробка-набор (480 шт.)", fish: "Окунь", price: 4500, desc: "Полный набор 480 шт.", image: "https://images.unsplash.com/photo-1599058917212-d750089bc07e?q=80&w=400", action: "Заказать 📦" }
 ];
 
-// --- Состояния сценария ---
 const userStates = {}; 
 
-// --- ЧАТ ---
 app.post('/api/chat', async (req, res) => {
     const { userId, text } = req.body;
     
     try {
-        // Сохраняем сообщение клиента
         await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'client', text]);
         adminSockets.forEach(ws => ws.send(JSON.stringify({ type: 'new_message', userId, text })));
 
@@ -75,7 +62,6 @@ app.post('/api/chat', async (req, res) => {
         let options = [];
         let productsToSend = null;
 
-        // Если ждем менеджера - не отвечаем автоматически
         if (state.step === 'waiting_for_manager') {
             await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
                 chat_id: process.env.TELEGRAM_CHAT_ID, text: `💬 Клиент (${userId}): ${text}`
@@ -83,7 +69,6 @@ app.post('/api/chat', async (req, res) => {
             return res.json({ text: "", options: [] }); 
         }
 
-        // Обработка кнопок
         if (text === "Начать заново") {
             delete userStates[userId];
             return res.json({ text: "Поехали заново! На какую рыбу планируете охоту?", options: ["Окунь", "Щука", "Судак", "Не знаю"] });
@@ -134,15 +119,11 @@ app.post('/api/chat', async (req, res) => {
             }
         }
 
-        // Сохраняем ответ бота и отправляем через WebSocket
         if (botReply) {
             await pool.query('INSERT INTO messages (user_id, sender, text) VALUES (?, ?, ?)', [userId, 'bot', botReply]);
             if (activeChats[userId]) {
                 activeChats[userId].send(JSON.stringify({ 
-                    type: 'bot_reply', 
-                    text: botReply, 
-                    options: options, 
-                    products: productsToSend 
+                    type: 'bot_reply', text: botReply, options: options, products: productsToSend 
                 }));
             }
         }
@@ -154,17 +135,12 @@ app.post('/api/chat', async (req, res) => {
     }
 });
 
-// --- ЗАКАЗ ---
+// --- ЗАКАЗ И СБОР КОНТАКТОВ ---
 app.post('/api/order', async (req, res) => {
     const { userId, productName, price } = req.body;
     try {
         await pool.query('INSERT INTO orders (user_id, product_name, price) VALUES (?, ?, ?)', [userId, productName, price]);
         userStates[userId] = { step: 'awaiting_phone', data: { productName, price } };
-        
-        await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
-            chat_id: process.env.TELEGRAM_CHAT_ID, text: `🛒 Клиент (${userId}) хочет: ${productName} за ${price} ₽`
-        }).catch(() => {});
-
         res.json({ success: true, message: `Отлично! Вы выбрали ${productName}. Напишите ваше ФИО и телефон.` });
     } catch (e) { res.status(500).json({ error: "Ошибка БД" }); }
 });
@@ -172,17 +148,31 @@ app.post('/api/order', async (req, res) => {
 app.post('/api/contact', async (req, res) => {
     const { userId, contactInfo } = req.body;
     const state = userStates[userId];
+    
     if (state && state.step === 'awaiting_phone') {
+        // ПРОСТАЯ ПРОВЕРКА: есть ли цифры в ответе (телефон)
+        const hasDigits = /\d/.test(contactInfo); 
+        
+        if (!hasDigits) {
+            // Если нет цифр, просим телефон
+            return res.json({ 
+                success: false, 
+                message: "Пожалуйста, напишите ваш номер телефона (или ФИО и телефон одним сообщением)." 
+            });
+        }
+
+        // Если есть цифры - принимаем заказ
         try {
             await pool.query('UPDATE orders SET contact_info = ? WHERE user_id = ? ORDER BY id DESC LIMIT 1', [contactInfo, userId]);
             await axios.post(`https://api.telegram.org/bot${process.env.TELEGRAM_TOKEN}/sendMessage`, {
                 chat_id: process.env.TELEGRAM_CHAT_ID, text: `🔥 ЗАКАЗ! Товар: ${state.data.productName}. Контакт: ${contactInfo}`
             }).catch(() => {});
+            
             delete userStates[userId];
-            res.json({ success: true, message: "Спасибо! Заказ принят. Менеджер свяжется с вами." });
-        } catch(e) { res.status(500).json({ success: false }); }
+            res.json({ success: true, message: "Спасибо! Заказ принят. Менеджер свяжется с вами в ближайшее время." });
+        } catch(e) { res.status(500).json({ success: false, message: "Ошибка при сохранении." }); }
     } else {
-        res.json({ success: false });
+        res.json({ success: false, message: "Ошибка состояния." });
     }
 });
 
